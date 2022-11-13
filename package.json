@@ -1,0 +1,20 @@
+{
+  "name": "nodeWebSocket",
+  "version": "1.0.0",
+  "description": "websocket experiment",
+  "scripts": {
+    "test": "./node_modules/.bin/mocha ./test/**/*.spec.js --exit"
+  },
+  "dependencies": {
+    "ws": "^8.11.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "supertest": "^6.3.1",
+    "superwstest": "^2.0.3",
+    "chai": "^4.1.2",
+    "mocha": "^5.2.0"
+  }
+}
