@@ -1,10 +1,15 @@
+// integration test using client and server implementation
+
 const expect = require('chai').expect;
 const wsServer = require('../lib/wsServer');
-const { wsClient, Subscribe } = require('../lib/wsClient');
+const { wsClient, sendMessage, eventEmitter } = require('../lib/wsClient');
 const http = require('http');
-const WSRequest = require('superwstest');
+const { sleep } = require("../lib/utils");
+const ENVS = require('../lib/constant');
+const WebSocket = require("ws");
 
-describe('Websocket server tests', function(){
+const { SUBSCRIPTION_RESPONSE_DELAY, UNSUBSCRIPTION_RESPONSE_DELAY } = ENVS;
+describe('Websocket Server/Client integration tests', function(){
     let server = undefined;
     let wsc = undefined;
     let wss = undefined;
@@ -14,97 +19,118 @@ describe('Websocket server tests', function(){
         wss = wsServer({ server });
         wsc = wsClient('ws://localhost:8080');
         server.listen(8080);
+        await sleep(5);
     });
 
-    after(function(done) {
+    after(async () => {
         if(server) {
             wsc && wsc.terminate();
-            server.on('close', () => { done(); });
             server.close(() => { server.unref(); });
         }
+        eventEmitter.removeAllListeners();
     });
 
-    it('Subscribe Test', function(done) {
-        Subscribe(wsc);
-        done();
+    afterEach(async () => {
+        eventEmitter.removeAllListeners();
     });
 
     it('Should return bad formatted payload if not json', async () => {
-        await WSRequest(server)
-            .ws('/')
-            .expectText('Welcome')
-            .sendText('foo')
-            .expectText((actual) => {
-                expect(actual).contain('Bad formatted payload');
-            })
-            .close()
-            .expectClosed();
+        if(wsc.readyState === WebSocket.OPEN) {
+            wsc.send("hello");
+        }
+        eventEmitter.on('wsm:Error',async (data) => {
+            await expect(data.error).equal('Bad formatted payload, non JSON');
+        });
+        await sleep(2500);
+    }).timeout(3000);
+
+    it('Should return requested method not implemented if not one of common message pattern (Subscribe|Unscubscribe|CountSubscribers)', async () => {
+        sendMessage(wsc,'MAgIC');
+        eventEmitter.on('wsm:Error',async (data) => {
+            await expect(data.error).equal('Requested method not implemented');
+        });
     });
 
-    it('Should return requested method not implemented if not one of common message pattern', async () => {
-        await WSRequest(server)
-            .ws('/')
-            .expectText('Welcome')
-            .sendText('{"type":"magic"}')
-            .expectText((actual) => {
-                expect(actual).contain('Requested method not implemented');
-            })
-            .close()
-            .expectClosed();
+    it('Should show 0 subscription', async () => {
+        sendMessage(wsc, 'CountSubscribers');
+        eventEmitter.on('wsm:CountSubscribers',async (data) => {
+            await expect(data.count).equal(0);
+        });
+        await sleep(10);
     });
 
-    it('Should subscribe upon client request', async () => {
-        await WSRequest(server)
-            .ws('/')
-            .expectText('Welcome')
-            .sendText('{"type":"Subscribe"}')
-            .expectText((actual) => {
-                expect(actual).contain('Subscribed');
-            })
-            .wait(1000)
-            .sendText('{"type":"Subscribe"}')
-            .expectText((actual) => {
-                expect(actual).contain('Subscribed');
-            })
-            .sendText('{"type":"CountSubscribers"}')
-            .expectText((actual) => {
-                expect(actual).contain('"count":1');
-            })
-            .close()
-            .expectClosed();
-    });
+    it('Subscribe Test', async () => {
+        sendMessage(wsc,'Subscribe');
+        eventEmitter.on('wsm:Subscribe',async (data) => {
+            await expect(data.status).equal('Subscribed');
+        });
+        await sleep(SUBSCRIPTION_RESPONSE_DELAY + 5);
+    }).timeout(SUBSCRIPTION_RESPONSE_DELAY + 20);
 
-    it('Should subscribe and unsubscribe', async () => {
-        await WSRequest(server)
-            .ws('/')
-            .expectText('Welcome')
-            .sendText('{"type":"Subscribe"}')
-            .expectText((actual) => {
-                expect(actual).contain('Subscribe');
-            })
-            .sendText('{"type":"CountSubscribers"}')
-            .expectText((actual) => {
-                expect(actual).contain('"count":1');
-            })
-            .wait(1000)
-            .sendText('{"type":"Unscubscribe"}')
-            .expectText((actual) => {
-                expect(actual).contain('Unsubscribed');
-            })
-            .sendText('{"type":"CountSubscribers"}')
-            .expectText((actual) => {
-                expect(actual).contain('"count":0');
-            })
-            .wait(1000)
-            .sendText('{"type":"Unscubscribe"}')
-            .expectText((actual) => {
-                expect(actual).contain('Unsubscribed');
-            })
-            .sendText('{"type":"CountSubscribers"}')
-            .expectText((actual) => {
-                expect(actual).contain('"count":0');
-            })
-            .close()
-            .expectClosed();
-    }).timeout(30000);
+
+    it('Should show 1 subscription and test Subscription idempotent rule', async () => {
+        sendMessage(wsc,'Subscribe');
+        let firstSubscriptionData, secondSubscriptionData;
+        eventEmitter.on('wsm:Subscribe',async (data) => {
+            firstSubscriptionData = data;
+            await expect(data.status).equal('Subscribed');
+        });
+        await sleep(SUBSCRIPTION_RESPONSE_DELAY + 5);
+        eventEmitter.removeAllListeners('wsm:Subscribe');
+
+        sendMessage(wsc,'Subscribe');
+        eventEmitter.on('wsm:Subscribe',async (data) => {
+            secondSubscriptionData = data;
+            await expect(data.status).equal('Subscribed');
+        });
+        await sleep(SUBSCRIPTION_RESPONSE_DELAY + 50);
+
+        // subscription idempotent test
+        expect(firstSubscriptionData.updatedAt).equal(secondSubscriptionData.updatedAt);
+
+        sendMessage(wsc, 'CountSubscribers');
+        eventEmitter.on('wsm:CountSubscribers',async (data) => {
+            await expect(data.count).equal(1);
+        });
+        await sleep(10);
+    }).timeout(2 * SUBSCRIPTION_RESPONSE_DELAY + 500);
+
+    it('Should successfully subscribe -> count(1) -> 2 * unsubscribe (idempotent) -> count(0)', async () => {
+        let firstUnSubscriptionData, secondUnSubscriptionData;
+        sendMessage(wsc,'Subscribe');
+        eventEmitter.on('wsm:Subscribe',async (data) => {
+            await expect(data.status).equal("Subscribed");
+        });
+        await sleep(SUBSCRIPTION_RESPONSE_DELAY + 5);
+        sendMessage(wsc, 'CountSubscribers');
+        eventEmitter.on('wsm:CountSubscribers',async (data) => {
+            await expect(data.count).equal(1);
+        });
+        eventEmitter.removeAllListeners('wsm:CountSubscribers');
+        await sleep(100);
+
+        sendMessage(wsc,'Unscubscribe');
+        eventEmitter.on('wsm:Unscubscribe',async (data) => {
+            firstUnSubscriptionData = data;
+            await expect(data.status).equal("Unsubscribed");
+        });
+        await sleep(UNSUBSCRIPTION_RESPONSE_DELAY + 100);
+
+        sendMessage(wsc,'Unscubscribe');
+        eventEmitter.on('wsm:Unscubscribe',async (data) => {
+            secondUnSubscriptionData = data;
+            await expect(data.status).equal("Unsubscribed");
+        });
+        await sleep(UNSUBSCRIPTION_RESPONSE_DELAY + 5);
+
+        // unsubscription idempotent test
+        expect(firstUnSubscriptionData.updatedAt).equal(secondUnSubscriptionData.updatedAt);
+
+        sendMessage(wsc, 'CountSubscribers');
+        eventEmitter.on('wsm:CountSubscribers',async (data) => {
+            await expect(data.count).equal(0);
+        });
+        await sleep(10);
+    }).timeout(SUBSCRIPTION_RESPONSE_DELAY + (2 * UNSUBSCRIPTION_RESPONSE_DELAY) + 500);
+
 })

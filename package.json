@@ -2,6 +2,7 @@
   "name": "nodeWebSocket",
   "version": "1.0.0",
   "description": "websocket experiment",
+  "main": "lib/index.js",
   "scripts": {
     "test": "./node_modules/.bin/mocha ./test/**/*.spec.js --exit"
   },
